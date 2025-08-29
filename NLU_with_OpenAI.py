@@ -1,11 +1,18 @@
 # nlu_extract.py
-import json
+import os
+from dotenv import load_dotenv
+from openai import OpenAI
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from openai import OpenAI
-
+import json
 # Create client (reads OPENAI_API_KEY from your environment)
-client = OpenAI()
+load_dotenv()  # read .env
+
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    project=os.getenv("OPENAI_PROJECT")  # <- you need to set this too
+)
+
 
 # ---------- NLU: extract intent + slots via tool calling ----------
 def extract_event(utterance: str, user_tz: str = "America/New_York") -> dict:
