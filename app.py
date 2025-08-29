@@ -8,9 +8,11 @@ import json
 # Create client (reads OPENAI_API_KEY from your environment)
 load_dotenv()  # read .env
 
+os.environ["OPENAI_API_KEY"] = "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"
+os.environ["OPENAI_PROJECT"] = "proj_FJSlbjYFj9xMf0phoTVkxy3J"
+
 client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    project=os.getenv("OPENAI_PROJECT")  # <- you need to set this too
+      # <- you need to set this too
 )
 
 
