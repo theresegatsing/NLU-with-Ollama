@@ -55,3 +55,19 @@ def extract_event(utterance: str, user_tz: str = "America/New_York") -> dict:
     )
     return resp.output_parsed
 
+
+
+# 3) Convert to Google Calendar payload
+def to_gcal_event(nlu: dict) -> dict:
+    tz = nlu.get("timezone", "America/New_York")
+    ev = {
+        "summary": nlu.get("title", "(No title)"),
+        "start": {"dateTime": nlu["start"], "timeZone": tz} if "start" in nlu else None,
+        "end":   {"dateTime": nlu["end"],   "timeZone": tz} if "end" in nlu else None,
+    }
+    if "location" in nlu: ev["location"] = nlu["location"]
+    if "attendees" in nlu: ev["attendees"] = [{"email": a} for a in nlu["attendees"]]
+    if "recurrence" in nlu: ev["recurrence"] = [nlu["recurrence"]]
+    if "reminders" in nlu:
+        ev["reminders"] = {"useDefault": False, "overrides": nlu["reminders"]}
+    return {k:v for k,v in ev.items() if v is not None}
