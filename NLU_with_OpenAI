@@ -3,3 +3,40 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 client = OpenAI()
+
+# 1) Define schema
+# used to define the structure of the data we want to extract
+
+EVENT_SCHEMA = {
+  "name": "CalendarEvent",
+  "strict": True,  # enforce exact schema
+  "schema": {
+    "type": "object",
+    "properties": {
+      "intent": {
+        "type": "string",
+        "enum": ["CreateEvent", "MoveEvent", "CancelEvent", "AddInvitees", "QueryFreeTime"]
+      },
+      "title": {"type": "string"},
+      "start": {"type": "string", "description": "RFC3339, e.g. 2025-09-03T16:00:00-04:00"},
+      "end":   {"type": "string", "description": "RFC3339, e.g. 2025-09-03T16:45:00-04:00"},
+      "timezone": {"type": "string", "default": "America/New_York"},
+      "location": {"type": "string"},
+      "attendees": {"type": "array", "items": {"type": "string", "description": "email or name"}},
+      "recurrence": {"type": "string", "description": "RFC5545 RRULE (optional)"},
+      "reminders": {
+        "type": "array",
+        "items": {"type": "object",
+          "properties": {
+            "method": {"type": "string", "enum": ["popup", "email"]},
+            "minutes": {"type": "integer"}
+          },
+          "required": ["method", "minutes"],
+          "additionalProperties": False
+        }
+      }
+    },
+    "required": ["intent"],
+    "additionalProperties": False
+  }
+}
