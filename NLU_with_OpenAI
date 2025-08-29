@@ -71,3 +71,13 @@ def to_gcal_event(nlu: dict) -> dict:
     if "reminders" in nlu:
         ev["reminders"] = {"useDefault": False, "overrides": nlu["reminders"]}
     return {k:v for k,v in ev.items() if v is not None}
+
+
+# 4) Test run
+if __name__ == "__main__":
+    utterance = "book a sprint planning next Wednesday at 4pm for 45 minutes with maya@ex.com and leo@ex.com"
+    nlu = extract_event(utterance)
+    print("NLU result:", nlu)
+    event_body = to_gcal_event(nlu)
+    print("Google Calendar payload:", event_body)
+    # gcal.events().insert(calendarId="primary", body=event_body).execute()
