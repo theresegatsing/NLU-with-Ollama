@@ -40,3 +40,18 @@ EVENT_SCHEMA = {
     "additionalProperties": False
   }
 }
+
+
+# 2) Extract event with OpenAI
+def extract_event(utterance: str, user_tz: str = "America/New_York") -> dict:
+    now = datetime.now(ZoneInfo(user_tz)).isoformat()
+    system = "Extract calendar intents and slots..."
+    user = f"reference_time={now}\ntimezone={user_tz}\nutterance={utterance}"
+    resp = client.responses.create(
+        model="gpt-4.1-mini",
+        input=[{"role":"system","content":system},
+               {"role":"user","content":user}],
+        response_format={ "type": "json_schema", "json_schema": EVENT_SCHEMA }
+    )
+    return resp.output_parsed
+
