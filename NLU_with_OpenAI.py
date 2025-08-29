@@ -1,141 +1,164 @@
-from openai import OpenAI
+# nlu_extract.py
+import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from openai import OpenAI
 
-# Client reads the key from env var OPENAI_API_KEY (recommended)
+# Create client (reads OPENAI_API_KEY from your environment)
 client = OpenAI()
 
-# 1) Define schema (contract between NLU and your calendar code)
-EVENT_SCHEMA = {
-    "name": "CalendarEvent",
-    "strict": True,  # enforce exact schema
-    "schema": {
-        "type": "object",
-        "properties": {
-            "intent": {
-                "type": "string",
-                "enum": ["CreateEvent", "MoveEvent", "CancelEvent", "AddInvitees", "QueryFreeTime"]
-            },
-            "title": {"type": "string"},
-            # Absolute datetimes in RFC3339 (with timezone offset, e.g., ...-04:00)
-            "start": {"type": "string", "description": "RFC3339, e.g. 2025-09-03T16:00:00-04:00"},
-            "end":   {"type": "string", "description": "RFC3339, e.g. 2025-09-03T16:45:00-04:00"},
-            "duration_minutes": {"type": "integer", "description": "Optional; used if end is not provided"},
-            "timezone": {"type": "string", "default": "America/New_York"},
-            "location": {"type": "string"},
-            "attendees": {"type": "array", "items": {"type": "string", "description": "email or name"}},
-            "recurrence": {"type": "string", "description": "RFC5545 RRULE (optional)"},
-            "reminders": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "method": {"type": "string", "enum": ["popup", "email"]},
-                        "minutes": {"type": "integer"}
-                    },
-                    "required": ["method", "minutes"],
-                    "additionalProperties": False
-                }
-            }
-        },
-        "required": ["intent"],
-        "additionalProperties": False
-    }
-}
-
-# 2) Extract event with OpenAI (Structured Outputs)
+# ---------- NLU: extract intent + slots via tool calling ----------
 def extract_event(utterance: str, user_tz: str = "America/New_York") -> dict:
+    """
+    Calls OpenAI to parse natural language into a structured event dict.
+    Returns keys like: intent, title, start, end, duration_minutes, timezone, attendees, etc.
+    """
     now = datetime.now(ZoneInfo(user_tz)).isoformat()
 
     system = (
-        "You extract calendar intents and slots from natural language."
-        " Always resolve relative dates/times to absolute RFC3339 with timezone offset"
-        " using the provided reference_time and timezone."
-        " If only a duration is given (e.g., 'for 45 minutes'), return duration_minutes."
-        " If both start and duration are present but end is missing, that's OK."
-        " If information is missing, still return what you are confident about."
-        " Do not invent emails; keep attendee strings as given."
+        "You extract calendar intents and slots from natural language. "
+        "Resolve relative dates/times to absolute RFC3339 WITH timezone offset "
+        "using the provided reference_time and timezone. "
+        "If only a duration is given (e.g., 'for 45 minutes'), return duration_minutes. "
+        "If info is missing, return what you're confident about. Do not invent emails."
     )
 
-    user = f"reference_time={now}\ntimezone={user_tz}\nutterance={utterance}"
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "extract_event",
+            "description": "Return calendar intent and slots as structured JSON.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "intent": {
+                        "type": "string",
+                        "enum": ["CreateEvent", "MoveEvent", "CancelEvent", "AddInvitees", "QueryFreeTime"]
+                    },
+                    "title": { "type": "string" },
+                    "start": { "type": "string", "description": "RFC3339 e.g. 2025-09-03T16:00:00-04:00" },
+                    "end":   { "type": "string", "description": "RFC3339 e.g. 2025-09-03T16:45:00-04:00" },
+                    "duration_minutes": { "type": "integer" },
+                    "timezone": { "type": "string", "default": "America/New_York" },
+                    "location": { "type": "string" },
+                    "attendees": {
+                        "type": "array",
+                        "items": { "type": "string", "description": "email or name as provided" }
+                    },
+                    "recurrence": { "type": "string", "description": "RFC5545 RRULE (optional)" },
+                    "reminders": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "method": { "type": "string", "enum": ["popup", "email"] },
+                                "minutes": { "type": "integer" }
+                            },
+                            "required": ["method", "minutes"],
+                            "additionalProperties": False
+                        }
+                    }
+                },
+                "required": ["intent"],
+                "additionalProperties": False
+            },
+            "strict": True
+        }
+    }]
 
-    resp = client.responses.create(
-        model="gpt-4.1-mini",
-        input=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user}
-        ],
-        response_format={"type": "json_schema", "json_schema": EVENT_SCHEMA},
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"reference_time={now}\ntimezone={user_tz}\nutterance={utterance}"}
+    ]
+
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",  # or "gpt-4.1-mini"
+        messages=messages,
+        tools=tools,
+        tool_choice={"type": "function", "function": {"name": "extract_event"}},
+        temperature=0
     )
 
-    return resp.output_parsed  # already a Python dict that conforms to EVENT_SCHEMA
+    tool_calls = resp.choices[0].message.tool_calls
+    if not tool_calls:
+        return {"intent": "QueryFreeTime"}  # safe minimal fallback
 
-# 3) Convert to Google Calendar payload (compute end if needed)
+    args_json = tool_calls[0].function.arguments
+    try:
+        data = json.loads(args_json)
+    except Exception:
+        data = {"intent": "QueryFreeTime"}
+
+    return data
+
+# ---------- Mapper: NLU -> Google Calendar payload ----------
 def to_gcal_event(nlu: dict) -> dict:
+    """
+    Transforms the NLU dict into a Google Calendar events().insert body.
+    Computes end if only start + duration_minutes are present.
+    """
     tz = nlu.get("timezone", "America/New_York")
-
     start = nlu.get("start")
     end = nlu.get("end")
     duration = nlu.get("duration_minutes")
 
-    # If no end but we have start + duration, compute end
+    # Compute end from duration if needed
     if start and not end and duration:
         try:
-            # Parse RFC3339 with offset, add duration
-            start_dt = datetime.fromisoformat(start)
+            start_dt = datetime.fromisoformat(start)  # RFC3339 with offset
             end_dt = start_dt + timedelta(minutes=int(duration))
             end = end_dt.isoformat()
         except Exception:
-            # If parsing fails, leave end as None and let your app ask user later
-            end = None
+            end = None  # leave None; your app can ask user later
 
-    ev = {
+    event = {
         "summary": nlu.get("title", "(No title)"),
         "start": {"dateTime": start, "timeZone": tz} if start else None,
         "end":   {"dateTime": end,   "timeZone": tz} if end else None,
     }
 
     if nlu.get("location"):
-        ev["location"] = nlu["location"]
+        event["location"] = nlu["location"]
 
     attendees = nlu.get("attendees")
     if attendees:
-        ev["attendees"] = [{"email": a} for a in attendees]
+        event["attendees"] = [{"email": a} for a in attendees]
 
     if nlu.get("recurrence"):
-        ev["recurrence"] = [nlu["recurrence"]]
+        event["recurrence"] = [nlu["recurrence"]]
 
     if nlu.get("reminders"):
-        ev["reminders"] = {"useDefault": False, "overrides": nlu["reminders"]}
+        event["reminders"] = {"useDefault": False, "overrides": nlu["reminders"]}
 
-    # Strip None values so GCal payload is clean
-    return {k: v for k, v in ev.items() if v is not None}
+    # Strip None values
+    return {k: v for k, v in event.items() if v is not None}
 
-# 4) Basic validation/printing helper
+# ---------- Optional: helper to print and spot missing fields ----------
 def print_result(nlu: dict, event_body: dict):
     print("\n=== NLU RESULT ===")
     print(nlu)
     print("\n=== GOOGLE CALENDAR PAYLOAD ===")
     print(event_body)
+
     missing = []
     if nlu.get("intent") == "CreateEvent":
-        if "start" not in nlu and "duration_minutes" not in nlu:
+        if not nlu.get("title"): missing.append("title")
+        if not nlu.get("start") and not nlu.get("duration_minutes"):
             missing.append("start or duration_minutes")
-        if "end" not in nlu and "duration_minutes" not in nlu:
+        if not nlu.get("end") and not nlu.get("duration_minutes"):
             missing.append("end or duration_minutes")
-        if not nlu.get("title"):
-            missing.append("title")
     if missing:
-        print("\n[Note] Missing critical fields:", ", ".join(missing), "- you may need a follow-up question.")
+        print("\n[Note] Missing critical fields:", ", ".join(missing),
+              "- you may need a follow-up question.")
 
-# 5) Test run
+# ---------- Demo run ----------
 if __name__ == "__main__":
-    # Try some variations; change this string to test your own utterances.
+    # Try your own utterances here:
     utterance = "book a sprint planning next Wednesday at 4pm for 45 minutes with maya@ex.com and leo@ex.com"
 
     nlu = extract_event(utterance, user_tz="America/New_York")
     event_body = to_gcal_event(nlu)
     print_result(nlu, event_body)
 
-    # If you want to actually insert:
+    # If you want to actually insert to Google Calendar:
     # gcal.events().insert(calendarId="primary", body=event_body).execute()
